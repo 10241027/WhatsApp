@@ -1,3 +1,3 @@
 # WhatsApp
 
-Tugas besar mata kuliah perancangan pl 
+Tugas besar mata kuliah Perencanaan Pengembangan Perangkat Lunak
