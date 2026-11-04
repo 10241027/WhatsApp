@@ -12,6 +12,17 @@ let pollInterval = null;
 let lastMessageId = 0;
 let typingTimeout = null;
 
+function applyTheme(theme) {
+	const selectedTheme = theme === 'dark' ? 'dark' : 'light';
+	document.body.dataset.theme = selectedTheme;
+	localStorage.setItem('whatsapp-theme', selectedTheme);
+	document.querySelectorAll('input[name="theme"]').forEach((input) => {
+		input.checked = input.value === selectedTheme;
+	});
+}
+
+applyTheme(localStorage.getItem('whatsapp-theme') || 'light');
+
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
 	'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 }[character]));
@@ -149,7 +160,7 @@ function renderChats() {
 	const visible = chats.filter((chat) => {
 		const matchesSearch = `${chat.contact_name} ${chat.contact_phone} ${chat.last_message || ''}`.toLocaleLowerCase('id').includes(search);
 		const isGroup = chat.contact_phone.toLowerCase().includes('anggota');
-		return matchesSearch && (activeFilter === 'all' || (activeFilter === 'groups' && isGroup) || (activeFilter === 'unread' && hasUnread(chat.id)));
+		return matchesSearch && (activeFilter === 'all' || activeFilter === 'archived' || (activeFilter === 'groups' && isGroup) || (activeFilter === 'unread' && hasUnread(chat.id)));
 	});
 	const unreadCount = chats.filter((chat) => hasUnread(chat.id)).length;
 	document.getElementById('chatCount').textContent = String(chats.length).padStart(2, '0');
@@ -167,7 +178,7 @@ function renderChats() {
 }
 
 async function loadChats(selectFirst = false) {
-	const result = await requestApi('chats');
+	const result = await requestApi(activeFilter === 'archived' ? 'chats&archived=1' : 'chats');
 	chats = result.chats;
 	if (chats.length && !localStorage.getItem('whatsapp-unread-seeded')) {
 		localStorage.setItem(unreadKey(chats[1]?.id || chats[0].id), '1');
@@ -175,6 +186,19 @@ async function loadChats(selectFirst = false) {
 	}
 	renderChats();
 	if (selectFirst && chats.length) openChat(chats[0].id);
+}
+
+function resetActiveChat() {
+	activeChatId = null;
+	if (pollInterval) {
+		clearInterval(pollInterval);
+		pollInterval = null;
+	}
+	document.getElementById('conversationHeader').classList.add('hidden');
+	document.getElementById('messageScroll').classList.add('hidden');
+	document.getElementById('messageForm').classList.add('hidden');
+	document.getElementById('welcomeState').classList.remove('hidden');
+	messenger.classList.remove('chat-open');
 }
 
 function renderReply(message) {
@@ -243,6 +267,9 @@ async function openChat(chatId) {
 	avatar.style.background = chat.avatar_color;
 	document.getElementById('activeName').textContent = chat.contact_name;
 	document.getElementById('activeStatus').textContent = chat.contact_phone || 'terakhir terlihat baru saja';
+	const archiveButton = document.getElementById('archiveChatButton');
+	archiveButton.title = Number(chat.archived) ? 'Pulihkan percakapan' : 'Arsipkan percakapan';
+	archiveButton.setAttribute('aria-label', archiveButton.title);
 	renderChats();
 	messenger.classList.add('chat-open');
 	try {
@@ -312,14 +339,21 @@ function setupMessenger() {
 	document.getElementById('profileName').textContent = user.name;
 	document.getElementById('profileEmail').textContent = user.email;
 	document.getElementById('profileButton').addEventListener('click', () => document.getElementById('profileMenu').classList.toggle('hidden'));
+	document.getElementById('settingsButton').addEventListener('click', () => openModal('settingsModal'));
+	document.querySelectorAll('input[name="theme"]').forEach((input) => input.addEventListener('change', (event) => {
+		applyTheme(event.target.value);
+		showToast(event.target.value === 'dark' ? 'Dark mode diaktifkan.' : 'Tema terang diaktifkan.');
+	}));
 	document.getElementById('logoutButton').addEventListener('click', logout);
 	document.getElementById('logoutFooter').addEventListener('click', logout);
 	document.getElementById('chatSearch').addEventListener('input', renderChats);
-	document.querySelectorAll('.filter-button').forEach((button) => button.addEventListener('click', () => {
+	document.querySelectorAll('.filter-button').forEach((button) => button.addEventListener('click', async () => {
 		document.querySelectorAll('.filter-button').forEach((item) => item.classList.remove('active'));
 		button.classList.add('active');
 		activeFilter = button.dataset.filter;
-		renderChats();
+		try {
+			await loadChats();
+		} catch (error) { showToast(error.message, 'error'); }
 	}));
 	document.getElementById('chatList').addEventListener('click', (event) => {
 		const row = event.target.closest('[data-chat-id]');
@@ -340,6 +374,8 @@ function setupMessenger() {
 			const result = await requestApi('chats', { method: 'POST', body: values });
 			closeModal(document.getElementById('chatModal'));
 			event.currentTarget.reset();
+			activeFilter = 'all';
+			document.querySelectorAll('.filter-button').forEach((item) => item.classList.toggle('active', item.dataset.filter === 'all'));
 			await loadChats();
 			openChat(result.chat_id);
 			showToast('Percakapan baru siap.');
@@ -358,17 +394,15 @@ function setupMessenger() {
 		} catch (error) { showToast(error.message, 'error'); }
 	});
 	document.getElementById('archiveChatButton').addEventListener('click', async () => {
-		if (!activeChatId || !window.confirm('Arsipkan percakapan ini?')) return;
+		const chat = chats.find((item) => Number(item.id) === activeChatId);
+		if (!activeChatId) return;
+		const archived = Boolean(Number(chat?.archived));
+		if (!window.confirm(archived ? 'Pulihkan percakapan ini dari arsip?' : 'Arsipkan percakapan ini?')) return;
 		try {
-			await requestApi('chats', { method: 'PATCH', body: { id: activeChatId, archived: true } });
-			activeChatId = null;
-			document.getElementById('conversationHeader').classList.add('hidden');
-			document.getElementById('messageScroll').classList.add('hidden');
-			document.getElementById('messageForm').classList.add('hidden');
-			document.getElementById('welcomeState').classList.remove('hidden');
+			await requestApi('chats', { method: 'PATCH', body: { id: activeChatId, archived: !archived } });
+			resetActiveChat();
 			await loadChats();
-			messenger.classList.remove('chat-open');
-			showToast('Percakapan diarsipkan.');
+			showToast(archived ? 'Percakapan dipulihkan.' : 'Percakapan diarsipkan.');
 		} catch (error) { showToast(error.message, 'error'); }
 	});
 	document.getElementById('deleteChatButton').addEventListener('click', async () => {

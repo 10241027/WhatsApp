@@ -145,8 +145,9 @@ if ($action === 'file' && $method === 'GET') {
 $user = requireUser();
 
 if ($action === 'chats' && $method === 'GET') {
-    $query = $db->prepare("SELECT c.*, (SELECT body FROM messages WHERE chat_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1) AS last_message, (SELECT COUNT(*) FROM messages WHERE chat_id = c.id AND attachment_path IS NOT NULL) AS file_count FROM chats c WHERE c.user_id = ? AND c.archived = 0 ORDER BY c.updated_at DESC, c.id DESC");
-    $query->execute([$user['id']]);
+    $archived = (int) filter_var($_GET['archived'] ?? false, FILTER_VALIDATE_BOOLEAN);
+    $query = $db->prepare("SELECT c.*, (SELECT body FROM messages WHERE chat_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1) AS last_message, (SELECT COUNT(*) FROM messages WHERE chat_id = c.id AND attachment_path IS NOT NULL) AS file_count FROM chats c WHERE c.user_id = ? AND c.archived = ? ORDER BY c.updated_at DESC, c.id DESC");
+    $query->execute([$user['id'], $archived]);
     jsonResponse(['chats' => $query->fetchAll()]);
 }
 
