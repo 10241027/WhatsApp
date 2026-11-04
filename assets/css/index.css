@@ -169,6 +169,7 @@ kbd { display: inline-grid; min-width: 19px; height: 19px; place-items: center; 
 .attachment-copy strong { max-width: 210px; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-copy small { color: #89968e; font-size: 9px; }
 .attachment-image { display: block; max-width: min(300px, 60vw); max-height: 230px; margin: 0 0 7px; border-radius: 5px; object-fit: cover; }
+.attachment-video { display: block; width: min(360px, 65vw); max-height: 280px; margin: 0 0 7px; border-radius: 5px; background: #17201c; }
 .composer { position: relative; display: flex; min-height: 74px; align-items: center; gap: 9px; padding: 11px 24px; border-top: 1px solid rgba(226, 232, 227, .9); background: white; }
 .composer textarea { width: 100%; max-height: 130px; min-height: 42px; resize: none; padding: 12px 15px; border: 1px solid #edf0ed; border-radius: 4px; background: #f8f9f8; color: #3a4b41; font-size: 12px; line-height: 1.4; outline: 0; }
 .composer textarea:focus { border-color: #c4d8ca; }

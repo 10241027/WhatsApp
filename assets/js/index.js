@@ -185,11 +185,14 @@ function renderReply(message) {
 
 function renderAttachment(message) {
 	if (!message.attachment_url) return '';
-	const image = String(message.attachment_mime || '').startsWith('image/');
+	const mime = String(message.attachment_mime || '');
+	const image = mime.startsWith('image/');
+	const video = mime.startsWith('video/');
 	const imagePreview = image ? `<a href="${escapeHtml(message.attachment_url)}" target="_blank" rel="noreferrer"><img class="attachment-image" src="${escapeHtml(message.attachment_url)}" alt="${escapeHtml(message.attachment_name)}"></a>` : '';
+	const videoPreview = video ? `<video class="attachment-video" controls preload="metadata"><source src="${escapeHtml(message.attachment_url)}" type="${escapeHtml(mime)}">Browser tidak mendukung pemutaran video.</video>` : '';
 	const extension = (message.attachment_name || 'FILE').split('.').pop().slice(0, 4).toUpperCase();
 	const size = Number(message.attachment_size) ? `${(Number(message.attachment_size) / 1024 / 1024).toFixed(2)} MB` : 'Lampiran';
-	return `${imagePreview}<a class="attachment-card" href="${escapeHtml(message.attachment_url)}" target="_blank" rel="noreferrer" download="${escapeHtml(message.attachment_name)}"><span class="attachment-icon">${escapeHtml(extension)}</span><span class="attachment-copy"><strong>${escapeHtml(message.attachment_name)}</strong><small>${escapeHtml(size)}</small></span></a>`;
+	return `${imagePreview}${videoPreview}<a class="attachment-card" href="${escapeHtml(message.attachment_url)}" target="_blank" rel="noreferrer" download="${escapeHtml(message.attachment_name)}"><span class="attachment-icon">${escapeHtml(extension)}</span><span class="attachment-copy"><strong>${escapeHtml(message.attachment_name)}</strong><small>${escapeHtml(size)}</small></span></a>`;
 }
 
 function renderMessages(messages, append = false) {
@@ -281,6 +284,7 @@ function resetAttachment() {
 	selectedFile = null;
 	document.getElementById('attachmentInput').value = '';
 	document.getElementById('photoInput').value = '';
+	document.getElementById('videoInput').value = '';
 	document.getElementById('attachmentPreview').classList.add('hidden');
 }
 
@@ -402,9 +406,22 @@ function setupMessenger() {
 		closeAttachmentMenu();
 		document.getElementById('photoInput').click();
 	});
+	document.getElementById('uploadVideoButton').addEventListener('click', () => {
+		closeAttachmentMenu();
+		document.getElementById('videoInput').click();
+	});
 	document.getElementById('uploadDocumentButton').addEventListener('click', () => {
 		closeAttachmentMenu();
 		document.getElementById('attachmentInput').click();
+	});
+	document.getElementById('videoInput').addEventListener('change', (event) => {
+		const file = event.target.files[0];
+		if (file && !['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'].includes(file.type)) {
+			resetAttachment();
+			showToast('Pilih video berformat MP4, WEBM, OGV, atau MOV.', 'error');
+			return;
+		}
+		selectAttachment(file);
 	});
 	document.getElementById('attachmentInput').addEventListener('change', (event) => {
 		selectAttachment(event.target.files[0]);

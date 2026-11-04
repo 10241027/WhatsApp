@@ -222,11 +222,11 @@ if ($action === 'messages' && $method === 'POST') {
             jsonResponse(['error' => 'Ukuran file maksimal 12 MB.'], 422);
         }
         $mime = (new finfo(FILEINFO_MIME_TYPE))->file($file['tmp_name']) ?: 'application/octet-stream';
-        $safeMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf', 'text/plain', 'application/zip', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
+        $safeMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'application/pdf', 'text/plain', 'application/zip', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
         if (!in_array($mime, $safeMimes, true)) {
             jsonResponse(['error' => 'Jenis file ini belum didukung.'], 422);
         }
-        $extensions = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp', 'application/pdf' => 'pdf', 'text/plain' => 'txt', 'application/zip' => 'zip', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx'];
+        $extensions = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp', 'video/mp4' => 'mp4', 'video/webm' => 'webm', 'video/ogg' => 'ogv', 'video/quicktime' => 'mov', 'application/pdf' => 'pdf', 'text/plain' => 'txt', 'application/zip' => 'zip', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx'];
         $pathName = bin2hex(random_bytes(20)) . '.' . $extensions[$mime];
         if (!move_uploaded_file($file['tmp_name'], UPLOAD_ROOT . '/' . $pathName)) {
             jsonResponse(['error' => 'File gagal disimpan.'], 500);
@@ -325,7 +325,7 @@ if ($action === 'backup.restore' && $method === 'POST') {
         $delete->execute([$user['id']]);
         $insertChat = $db->prepare('INSERT INTO chats (user_id, contact_name, contact_phone, avatar_color, archived) VALUES (?, ?, ?, ?, ?)');
         $insertMessage = $db->prepare('INSERT INTO messages (chat_id, sender, body, attachment_path, attachment_name, attachment_mime, attachment_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-        $extensions = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp', 'application/pdf' => 'pdf', 'text/plain' => 'txt', 'application/zip' => 'zip', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx'];
+        $extensions = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp', 'video/mp4' => 'mp4', 'video/webm' => 'webm', 'video/ogg' => 'ogv', 'video/quicktime' => 'mov', 'application/pdf' => 'pdf', 'text/plain' => 'txt', 'application/zip' => 'zip', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx'];
         $restoredBytes = 0;
         foreach ($backup['chats'] as $chat) {
             $name = trim((string) ($chat['contact_name'] ?? ''));
