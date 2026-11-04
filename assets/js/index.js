@@ -280,7 +280,27 @@ function startPolling() {
 function resetAttachment() {
 	selectedFile = null;
 	document.getElementById('attachmentInput').value = '';
+	document.getElementById('photoInput').value = '';
 	document.getElementById('attachmentPreview').classList.add('hidden');
+}
+
+function selectAttachment(file) {
+	selectedFile = file || null;
+	if (!selectedFile) return;
+	if (selectedFile.size > 12 * 1024 * 1024) {
+		resetAttachment();
+		showToast('Ukuran file maksimal 12 MB.', 'error');
+		return;
+	}
+	const preview = document.getElementById('attachmentPreview');
+	preview.innerHTML = `${escapeHtml(selectedFile.name)} · ${(selectedFile.size / 1024 / 1024).toFixed(2)} MB <button type="button" aria-label="Batalkan lampiran">×</button>`;
+	preview.classList.remove('hidden');
+	preview.querySelector('button').addEventListener('click', resetAttachment);
+}
+
+function closeAttachmentMenu() {
+	document.getElementById('attachmentMenu').classList.add('hidden');
+	document.getElementById('attachButton').setAttribute('aria-expanded', 'false');
 }
 
 function setupMessenger() {
@@ -372,19 +392,31 @@ function setupMessenger() {
 			pollInterval = null;
 		}
 	});
-	document.getElementById('attachButton').addEventListener('click', () => document.getElementById('attachmentInput').click());
+	document.getElementById('attachButton').addEventListener('click', () => {
+		const menu = document.getElementById('attachmentMenu');
+		const isOpen = !menu.classList.contains('hidden');
+		menu.classList.toggle('hidden', isOpen);
+		document.getElementById('attachButton').setAttribute('aria-expanded', String(!isOpen));
+	});
+	document.getElementById('uploadPhotoButton').addEventListener('click', () => {
+		closeAttachmentMenu();
+		document.getElementById('photoInput').click();
+	});
+	document.getElementById('uploadDocumentButton').addEventListener('click', () => {
+		closeAttachmentMenu();
+		document.getElementById('attachmentInput').click();
+	});
 	document.getElementById('attachmentInput').addEventListener('change', (event) => {
-		selectedFile = event.target.files[0] || null;
-		if (!selectedFile) return;
-		if (selectedFile.size > 12 * 1024 * 1024) {
+		selectAttachment(event.target.files[0]);
+	});
+	document.getElementById('photoInput').addEventListener('change', (event) => {
+		const file = event.target.files[0];
+		if (file && !['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(file.type)) {
 			resetAttachment();
-			showToast('Ukuran file maksimal 12 MB.', 'error');
+			showToast('Pilih foto berformat JPG, PNG, GIF, atau WEBP.', 'error');
 			return;
 		}
-		const preview = document.getElementById('attachmentPreview');
-		preview.innerHTML = `${escapeHtml(selectedFile.name)} · ${(selectedFile.size / 1024 / 1024).toFixed(2)} MB <button type="button" aria-label="Batalkan lampiran">×</button>`;
-		preview.classList.remove('hidden');
-		preview.querySelector('button').addEventListener('click', resetAttachment);
+		selectAttachment(file);
 	});
 	document.getElementById('messageInput').addEventListener('keydown', (event) => {
 		if (event.key === 'Enter' && !event.shiftKey) {
@@ -417,7 +449,11 @@ function setupMessenger() {
 		if (event.key === 'Escape') {
 			document.querySelectorAll('.modal:not(.hidden)').forEach(closeModal);
 			document.getElementById('profileMenu').classList.add('hidden');
+			closeAttachmentMenu();
 		}
+	});
+	document.addEventListener('click', (event) => {
+		if (!event.target.closest('.attachment-picker')) closeAttachmentMenu();
 	});
 	loadChats().catch((error) => showToast(error.message, 'error'));
 }

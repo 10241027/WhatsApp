@@ -39,7 +39,7 @@ Daftar dengan email dan kata sandi minimal 8 karakter. Karena integrasi email ti
 ### Fitur data
 
 - Kontak/chat: buat, lihat, ubah nama, arsipkan, dan hapus.
-- Pesan: kirim teks atau file, ubah, dan hapus pesan sendiri.
+- Pesan: kirim teks, upload foto, atau lampirkan file dan dokumen; ubah dan hapus pesan sendiri.
 - Cadangan: unduh JSON yang berisi chat, pesan, dan lampiran (maksimal total 25 MB); pemulihan mengganti data chat akun yang sedang masuk.
 
 Setiap akun mendapatkan beberapa percakapan contoh saat pertama kali masuk. Data tersebut berada di database lokal dan dapat diubah atau dihapus dari antarmuka.
