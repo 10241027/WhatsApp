@@ -1,0 +1,3 @@
+/config/database.php
+/database/whatsapp.sqlite
+/storage/uploads/*
