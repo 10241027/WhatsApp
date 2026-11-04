@@ -7,6 +7,10 @@ let activeChatId = null;
 let activeFilter = 'all';
 let selectedFile = null;
 let pendingEmail = '';
+let replyingTo = null;
+let pollInterval = null;
+let lastMessageId = 0;
+let typingTimeout = null;
 
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
 	'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -28,7 +32,11 @@ async function requestApi(action, options = {}) {
 		headers.set('Content-Type', 'application/json');
 		options.body = JSON.stringify(options.body);
 	}
-	const response = await fetch(`index.php?api=${encodeURIComponent(action)}`, { ...options, headers });
+	// Handle query parameters: if action contains &, don't encode the query string
+	const url = action.includes('&') || action.includes('=')
+		? `index.php?api=${action}`
+		: `index.php?api=${encodeURIComponent(action)}`;
+	const response = await fetch(url, { ...options, headers });
 	const contentType = response.headers.get('content-type') || '';
 	const result = contentType.includes('application/json') ? await response.json() : {};
 	if (!response.ok) throw new Error(result.error || 'Permintaan belum berhasil.');
@@ -169,6 +177,12 @@ async function loadChats(selectFirst = false) {
 	if (selectFirst && chats.length) openChat(chats[0].id);
 }
 
+function renderReply(message) {
+	if (!message.reply_to_id || !message.reply_body) return '';
+	const replyFrom = message.reply_sender === 'me' ? 'Anda' : 'Kontak';
+	return `<div class="message-reply"><svg viewBox="0 0 24 24" width="14" height="14"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg><span>${escapeHtml(replyFrom)}: ${escapeHtml(String(message.reply_body).slice(0, 50))}${String(message.reply_body).length > 50 ? '...' : ''}</span></div>`;
+}
+
 function renderAttachment(message) {
 	if (!message.attachment_url) return '';
 	const image = String(message.attachment_mime || '').startsWith('image/');
@@ -178,24 +192,44 @@ function renderAttachment(message) {
 	return `${imagePreview}<a class="attachment-card" href="${escapeHtml(message.attachment_url)}" target="_blank" rel="noreferrer" download="${escapeHtml(message.attachment_name)}"><span class="attachment-icon">${escapeHtml(extension)}</span><span class="attachment-copy"><strong>${escapeHtml(message.attachment_name)}</strong><small>${escapeHtml(size)}</small></span></a>`;
 }
 
-function renderMessages(messages) {
+function renderMessages(messages, append = false) {
 	const list = document.getElementById('messageList');
-	if (!messages.length) {
+	if (!messages.length && !append) {
 		list.innerHTML = '<div class="empty-list">Belum ada pesan. Mulai dengan menyapa.</div>';
 		return;
 	}
-	list.innerHTML = messages.map((message) => {
+	const html = messages.map((message) => {
 		const mine = message.sender === 'me';
-		return `<article class="message ${mine ? 'mine' : ''}" data-message-id="${Number(message.id)}"><div class="message-bubble">${message.attachment_url ? renderAttachment(message) : ''}${escapeHtml(message.body)}</div><div class="message-meta">${message.is_edited ? '<span class="message-edited">diedit</span>' : ''}<time>${escapeHtml(formatTime(message.created_at))}</time>${mine ? '<span>✓✓</span>' : ''}</div>${mine ? `<div class="message-actions"><button type="button" data-message-action="edit">Ubah</button><button type="button" data-message-action="delete">Hapus</button></div>` : ''}</article>`;
+		const readStatus = mine ? (message.is_read ? '<span class="read-receipt">✓✓</span>' : '<span>✓</span>') : '';
+		return `<article class="message ${mine ? 'mine' : ''}" data-message-id="${Number(message.id)}"><div class="message-bubble">${renderReply(message)}${message.attachment_url ? renderAttachment(message) : ''}${escapeHtml(message.body)}</div><div class="message-meta">${message.is_edited ? '<span class="message-edited">diedit</span>' : ''}<time>${escapeHtml(formatTime(message.created_at))}</time>${readStatus}</div>${mine ? `<div class="message-actions"><button type="button" data-message-action="reply">Balas</button><button type="button" data-message-action="edit">Ubah</button><button type="button" data-message-action="delete">Hapus</button></div>` : `<div class="message-actions"><button type="button" data-message-action="reply">Balas</button></div>`}</article>`;
 	}).join('');
+
+	if (append) {
+		list.insertAdjacentHTML('beforeend', html);
+	} else {
+		list.innerHTML = html;
+	}
+
 	const scroll = document.getElementById('messageScroll');
 	scroll.scrollTop = scroll.scrollHeight;
+
+	if (messages.length > 0) {
+		lastMessageId = Math.max(...messages.map(m => Number(m.id)));
+	}
 }
 
 async function openChat(chatId) {
 	const chat = chats.find((item) => Number(item.id) === Number(chatId));
 	if (!chat) return;
+
+	// Stop polling for previous chat
+	if (pollInterval) {
+		clearInterval(pollInterval);
+		pollInterval = null;
+	}
+
 	activeChatId = Number(chat.id);
+	lastMessageId = 0;
 	localStorage.removeItem(unreadKey(chat.id));
 	document.getElementById('welcomeState').classList.add('hidden');
 	document.getElementById('conversationHeader').classList.remove('hidden');
@@ -210,8 +244,37 @@ async function openChat(chatId) {
 	messenger.classList.add('chat-open');
 	try {
 		const result = await requestApi(`messages&chat_id=${encodeURIComponent(chat.id)}`);
-		if (Number(chat.id) === activeChatId) renderMessages(result.messages);
+		if (Number(chat.id) === activeChatId) {
+			renderMessages(result.messages);
+			startPolling();
+		}
 	} catch (error) { showToast(error.message, 'error'); }
+}
+
+function startPolling() {
+	if (pollInterval) clearInterval(pollInterval);
+	pollInterval = setInterval(async () => {
+		if (!activeChatId) return;
+		try {
+			const result = await requestApi(`messages.poll&chat_id=${encodeURIComponent(activeChatId)}&last_id=${lastMessageId}`);
+			if (result.messages && result.messages.length > 0 && Number(result.messages[0].chat_id) === activeChatId) {
+				renderMessages(result.messages, true);
+				await loadChats();
+
+				// Show notification sound/visual for new contact messages
+				const hasContactMessage = result.messages.some(m => m.sender === 'contact');
+				if (hasContactMessage) {
+					document.getElementById('activeStatus').textContent = 'online';
+					setTimeout(() => {
+						const chat = chats.find((item) => Number(item.id) === activeChatId);
+						document.getElementById('activeStatus').textContent = chat?.contact_phone || 'terakhir terlihat baru saja';
+					}, 3000);
+				}
+			}
+		} catch (error) {
+			console.error('Polling error:', error);
+		}
+	}, 3000); // Poll every 3 seconds
 }
 
 function resetAttachment() {
@@ -287,6 +350,10 @@ function setupMessenger() {
 	document.getElementById('deleteChatButton').addEventListener('click', async () => {
 		if (!activeChatId || !window.confirm('Hapus percakapan beserta semua pesannya?')) return;
 		try {
+			if (pollInterval) {
+				clearInterval(pollInterval);
+				pollInterval = null;
+			}
 			await requestApi('chats', { method: 'DELETE', body: { id: activeChatId } });
 			activeChatId = null;
 			document.getElementById('conversationHeader').classList.add('hidden');
@@ -298,7 +365,13 @@ function setupMessenger() {
 			showToast('Percakapan dihapus.');
 		} catch (error) { showToast(error.message, 'error'); }
 	});
-	document.getElementById('backToChats').addEventListener('click', () => messenger.classList.remove('chat-open'));
+	document.getElementById('backToChats').addEventListener('click', () => {
+		messenger.classList.remove('chat-open');
+		if (pollInterval) {
+			clearInterval(pollInterval);
+			pollInterval = null;
+		}
+	});
 	document.getElementById('attachButton').addEventListener('click', () => document.getElementById('attachmentInput').click());
 	document.getElementById('attachmentInput').addEventListener('change', (event) => {
 		selectedFile = event.target.files[0] || null;
@@ -322,6 +395,14 @@ function setupMessenger() {
 	document.getElementById('messageInput').addEventListener('input', (event) => {
 		event.target.style.height = 'auto';
 		event.target.style.height = `${Math.min(event.target.scrollHeight, 130)}px`;
+
+		// Typing indicator
+		if (activeChatId && event.target.value.trim()) {
+			if (typingTimeout) clearTimeout(typingTimeout);
+			typingTimeout = setTimeout(() => {
+				requestApi('messages.typing', { method: 'POST', body: { chat_id: activeChatId } }).catch(() => {});
+			}, 500);
+		}
 	});
 	document.getElementById('messageForm').addEventListener('submit', sendMessage);
 	document.getElementById('messageList').addEventListener('click', handleMessageAction);
@@ -350,6 +431,7 @@ async function sendMessage(event) {
 	formData.set('chat_id', activeChatId);
 	formData.set('body', body);
 	if (selectedFile) formData.set('attachment', selectedFile);
+	if (replyingTo) formData.set('reply_to_id', replyingTo);
 	const submit = event.currentTarget.querySelector('.send-button');
 	submit.disabled = true;
 	try {
@@ -357,14 +439,36 @@ async function sendMessage(event) {
 		document.getElementById('messageInput').value = '';
 		document.getElementById('messageInput').style.height = '';
 		resetAttachment();
+		resetReply();
 		const currentChat = activeChatId;
 		await loadChats();
 		if (currentChat === activeChatId) {
 			const result = await requestApi(`messages&chat_id=${encodeURIComponent(currentChat)}`);
 			renderMessages(result.messages);
+			startPolling();
 		}
 	} catch (error) { showToast(error.message, 'error'); }
 	finally { submit.disabled = false; }
+}
+
+function resetReply() {
+	replyingTo = null;
+	const replyPreview = document.getElementById('replyPreview');
+	if (replyPreview) replyPreview.remove();
+}
+
+function showReplyPreview(message) {
+	resetReply();
+	replyingTo = Number(message.id);
+	const replyText = message.body || 'Lampiran';
+	const composer = document.getElementById('messageForm');
+	const preview = document.createElement('div');
+	preview.id = 'replyPreview';
+	preview.className = 'reply-preview';
+	preview.innerHTML = `<div class="reply-preview-content"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg><span>Membalas: ${escapeHtml(String(replyText).slice(0, 50))}${String(replyText).length > 50 ? '...' : ''}</span></div><button type="button" aria-label="Batalkan balasan">×</button>`;
+	composer.insertBefore(preview, composer.firstChild);
+	preview.querySelector('button').addEventListener('click', resetReply);
+	document.getElementById('messageInput').focus();
 }
 
 async function handleMessageAction(event) {
@@ -372,20 +476,45 @@ async function handleMessageAction(event) {
 	if (!button) return;
 	const messageElement = button.closest('[data-message-id]');
 	const messageId = Number(messageElement.dataset.messageId);
+	const action = button.dataset.messageAction;
+
 	try {
-		if (button.dataset.messageAction === 'delete') {
+		if (action === 'reply') {
+			const messageBubble = messageElement.querySelector('.message-bubble');
+			const replyBubble = messageBubble.querySelector('.message-reply');
+			let messageBody = messageBubble.innerText.trim();
+
+			// Remove reply text if exists
+			if (replyBubble) {
+				messageBody = messageBody.replace(replyBubble.innerText.trim(), '').trim();
+			}
+
+			showReplyPreview({ id: messageId, body: messageBody });
+		} else if (action === 'delete') {
 			if (!window.confirm('Hapus pesan ini?')) return;
 			await requestApi('messages', { method: 'DELETE', body: { id: messageId } });
-		} else {
-			const currentText = messageElement.querySelector('.message-bubble').innerText.trim();
+			const result = await requestApi(`messages&chat_id=${encodeURIComponent(activeChatId)}`);
+			renderMessages(result.messages);
+			await loadChats();
+			showToast('Pesan dihapus.');
+		} else if (action === 'edit') {
+			const messageBubble = messageElement.querySelector('.message-bubble');
+			const replyBubble = messageBubble.querySelector('.message-reply');
+			let currentText = messageBubble.innerText.trim();
+
+			// Remove reply text if exists
+			if (replyBubble) {
+				currentText = currentText.replace(replyBubble.innerText.trim(), '').trim();
+			}
+
 			const body = window.prompt('Ubah pesan', currentText);
 			if (body === null || !body.trim()) return;
 			await requestApi('messages', { method: 'PATCH', body: { id: messageId, body: body.trim() } });
+			const result = await requestApi(`messages&chat_id=${encodeURIComponent(activeChatId)}`);
+			renderMessages(result.messages);
+			await loadChats();
+			showToast('Pesan diperbarui.');
 		}
-		const result = await requestApi(`messages&chat_id=${encodeURIComponent(activeChatId)}`);
-		renderMessages(result.messages);
-		await loadChats();
-		showToast(button.dataset.messageAction === 'delete' ? 'Pesan dihapus.' : 'Pesan diperbarui.');
 	} catch (error) { showToast(error.message, 'error'); }
 }
 
