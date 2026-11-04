@@ -37,6 +37,7 @@
                 <button class="text-button" id="resendCode" type="button">Kirim kode baru</button>
             </form>
             <div class="auth-switch" id="authSwitch">Belum punya akun? <button class="text-button" id="showRegister" type="button">Daftar</button></div>
+            <div class="auth-switch hidden" id="authSwitchLogin">Sudah punya akun? <button class="text-button" id="showLogin" type="button">Masuk</button></div>
             <p class="auth-footnote">Dengan melanjutkan, kamu menyetujui ketentuan penggunaan dan kebijakan privasi.</p>
         </div>
         <div class="auth-panel-bottom"><span>INDONESIA · 2025</span><span>Pribadi, selalu.</span></div>

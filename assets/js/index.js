@@ -39,7 +39,8 @@ function setAuthMode(mode) {
 	const login = document.getElementById('loginForm');
 	const register = document.getElementById('registerForm');
 	const verify = document.getElementById('verifyForm');
-	const switcher = document.getElementById('authSwitch');
+	const switcherRegister = document.getElementById('authSwitch');
+	const switcherLogin = document.getElementById('authSwitchLogin');
 	const titles = {
 		login: ['AKUN WHATSAPP', 'Masuk kembali', 'Lanjutkan percakapan yang berarti.'],
 		register: ['MULAI BERSAMA', 'Buat akunmu', 'Satu ruang untuk kabar sehari-hari.'],
@@ -48,7 +49,8 @@ function setAuthMode(mode) {
 	login?.classList.toggle('hidden', mode !== 'login');
 	register?.classList.toggle('hidden', mode !== 'register');
 	verify?.classList.toggle('hidden', mode !== 'verify');
-	if (switcher) switcher.classList.toggle('hidden', mode === 'verify');
+	if (switcherRegister) switcherRegister.classList.toggle('hidden', mode !== 'login');
+	if (switcherLogin) switcherLogin.classList.toggle('hidden', mode !== 'register');
 	document.getElementById('authEyebrow').textContent = titles[mode][0];
 	document.getElementById('authTitle').textContent = titles[mode][1];
 	document.getElementById('authSubtitle').textContent = titles[mode][2];
@@ -73,7 +75,7 @@ function showDemoCode(code) {
 
 function setupAuthentication() {
 	document.getElementById('showRegister')?.addEventListener('click', () => setAuthMode('register'));
-	document.getElementById('authSwitch')?.querySelector('.text-button')?.addEventListener('click', () => setAuthMode('login'));
+	document.getElementById('showLogin')?.addEventListener('click', () => setAuthMode('login'));
 	document.getElementById('loginForm')?.addEventListener('submit', async (event) => {
 		event.preventDefault();
 		const values = Object.fromEntries(new FormData(event.currentTarget));
