@@ -73,42 +73,6 @@ function requestData(): array
     return is_array($decoded) ? $decoded : $_POST;
 }
 
-function seedChats(int $userId): void
-{
-    $db = database();
-    $exists = $db->prepare('SELECT COUNT(*) FROM chats WHERE user_id = ?');
-    $exists->execute([$userId]);
-    if ((int) $exists->fetchColumn() > 0) {
-        return;
-    }
-
-    $samples = [
-        ['Nadia Putri', '0812 8041 7721', '#a77458', [
-            ['contact', 'Foto-foto kemarin lucu banget, makasih ya!'],
-            ['me', 'Aku pilih beberapa yang paling bagus, nanti kukirim.'],
-            ['contact', 'Sudah aku kirim ya, cek folder unduhanmu.'],
-        ]],
-        ['Raka Mahendra', '0813 6502 1840', '#667b91', [
-            ['me', 'Aku sudah pesan tiketnya.'],
-            ['contact', 'Sip! Besok jadi berangkat jam berapa?'],
-        ]],
-        ['Keluarga', '3 anggota', '#8d745f', [
-            ['contact', 'Ayah: Hati-hati di jalan ya.'],
-            ['me', 'Siap, nanti aku kabari.'],
-            ['contact', 'Ibu: Jangan lupa kabari kalau sudah sampai.'],
-        ]],
-    ];
-    $insertChat = $db->prepare('INSERT INTO chats (user_id, contact_name, contact_phone, avatar_color) VALUES (?, ?, ?, ?)');
-    $insertMessage = $db->prepare('INSERT INTO messages (chat_id, sender, body, created_at) VALUES (?, ?, ?, ?)');
-    foreach ($samples as $index => [$name, $phone, $color, $messages]) {
-        $insertChat->execute([$userId, $name, $phone, $color]);
-        $chatId = (int) $db->lastInsertId();
-        foreach ($messages as $messageIndex => [$sender, $body]) {
-            $age = (($index + 1) * 3600) + ((count($messages) - $messageIndex) * 150);
-            $insertMessage->execute([$chatId, $sender, $body, date('Y-m-d H:i:s', time() - $age)]);
-        }
-    }
-}
 
 if (session_status() !== PHP_SESSION_ACTIVE) {
     session_set_cookie_params([
