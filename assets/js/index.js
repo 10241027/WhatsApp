@@ -7,10 +7,8 @@ let activeChatId = null;
 let activeFilter = 'all';
 let selectedFile = null;
 let pendingEmail = '';
-let replyingTo = null;
 let pollInterval = null;
 let lastMessageId = 0;
-let typingTimeout = null;
 
 function applyTheme(theme) {
 	const selectedTheme = theme === 'dark' ? 'dark' : 'light';
@@ -159,8 +157,7 @@ function renderChats() {
 	const search = document.getElementById('chatSearch').value.trim().toLocaleLowerCase('id');
 	const visible = chats.filter((chat) => {
 		const matchesSearch = `${chat.contact_name} ${chat.contact_phone} ${chat.last_message || ''}`.toLocaleLowerCase('id').includes(search);
-		const isGroup = chat.contact_phone.toLowerCase().includes('anggota');
-		return matchesSearch && (activeFilter === 'all' || activeFilter === 'archived' || (activeFilter === 'groups' && isGroup) || (activeFilter === 'unread' && hasUnread(chat.id)));
+		return matchesSearch && (activeFilter === 'all' || activeFilter === 'archived' || (activeFilter === 'unread' && hasUnread(chat.id)));
 	});
 	const unreadCount = chats.filter((chat) => hasUnread(chat.id)).length;
 	document.getElementById('chatCount').textContent = String(chats.length).padStart(2, '0');
@@ -180,10 +177,6 @@ function renderChats() {
 async function loadChats(selectFirst = false) {
 	const result = await requestApi(activeFilter === 'archived' ? 'chats&archived=1' : 'chats');
 	chats = result.chats;
-	if (chats.length && !localStorage.getItem('whatsapp-unread-seeded')) {
-		localStorage.setItem(unreadKey(chats[1]?.id || chats[0].id), '1');
-		localStorage.setItem('whatsapp-unread-seeded', '1');
-	}
 	renderChats();
 	if (selectFirst && chats.length) openChat(chats[0].id);
 }
@@ -199,12 +192,6 @@ function resetActiveChat() {
 	document.getElementById('messageForm').classList.add('hidden');
 	document.getElementById('welcomeState').classList.remove('hidden');
 	messenger.classList.remove('chat-open');
-}
-
-function renderReply(message) {
-	if (!message.reply_to_id || !message.reply_body) return '';
-	const replyFrom = message.reply_sender === 'me' ? 'Anda' : 'Kontak';
-	return `<div class="message-reply"><svg viewBox="0 0 24 24" width="14" height="14"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg><span>${escapeHtml(replyFrom)}: ${escapeHtml(String(message.reply_body).slice(0, 50))}${String(message.reply_body).length > 50 ? '...' : ''}</span></div>`;
 }
 
 function renderAttachment(message) {
@@ -228,7 +215,7 @@ function renderMessages(messages, append = false) {
 	const html = messages.map((message) => {
 		const mine = message.sender === 'me';
 		const readStatus = mine ? (message.is_read ? '<span class="read-receipt">✓✓</span>' : '<span>✓</span>') : '';
-		return `<article class="message ${mine ? 'mine' : ''}" data-message-id="${Number(message.id)}"><div class="message-bubble">${renderReply(message)}${message.attachment_url ? renderAttachment(message) : ''}${escapeHtml(message.body)}</div><div class="message-meta">${message.is_edited ? '<span class="message-edited">diedit</span>' : ''}<time>${escapeHtml(formatTime(message.created_at))}</time>${readStatus}</div>${mine ? `<div class="message-actions"><button type="button" data-message-action="reply">Balas</button><button type="button" data-message-action="edit">Ubah</button><button type="button" data-message-action="delete">Hapus</button></div>` : `<div class="message-actions"><button type="button" data-message-action="reply">Balas</button></div>`}</article>`;
+		return `<article class="message ${mine ? 'mine' : ''}" data-message-id="${Number(message.id)}"><div class="message-bubble">${message.attachment_url ? renderAttachment(message) : ''}${escapeHtml(message.body)}</div><div class="message-meta">${message.is_edited ? '<span class="message-edited">diedit</span>' : ''}<time>${escapeHtml(formatTime(message.created_at))}</time>${readStatus}</div>${mine ? `<div class="message-actions"><button type="button" data-message-action="edit">Ubah</button><button type="button" data-message-action="delete">Hapus</button></div>` : `<div class="message-actions"></div>`}</article>`;
 	}).join('');
 
 	if (append) {
@@ -369,11 +356,12 @@ function setupMessenger() {
 	document.getElementById('welcomeNewChat').addEventListener('click', () => openModal('chatModal'));
 	document.getElementById('newChatForm').addEventListener('submit', async (event) => {
 		event.preventDefault();
-		const values = Object.fromEntries(new FormData(event.currentTarget));
+		const form = event.currentTarget;
+		const values = Object.fromEntries(new FormData(form));
 		try {
 			const result = await requestApi('chats', { method: 'POST', body: values });
 			closeModal(document.getElementById('chatModal'));
-			event.currentTarget.reset();
+			if (form && typeof form.reset === 'function') form.reset();
 			activeFilter = 'all';
 			document.querySelectorAll('.filter-button').forEach((item) => item.classList.toggle('active', item.dataset.filter === 'all'));
 			await loadChats();
@@ -479,19 +467,9 @@ function setupMessenger() {
 		event.target.style.height = 'auto';
 		event.target.style.height = `${Math.min(event.target.scrollHeight, 130)}px`;
 
-		// Typing indicator
-		if (activeChatId && event.target.value.trim()) {
-			if (typingTimeout) clearTimeout(typingTimeout);
-			typingTimeout = setTimeout(() => {
-				requestApi('messages.typing', { method: 'POST', body: { chat_id: activeChatId } }).catch(() => {});
-			}, 500);
-		}
 	});
 	document.getElementById('messageForm').addEventListener('submit', sendMessage);
 	document.getElementById('messageList').addEventListener('click', handleMessageAction);
-	document.getElementById('backupButton').addEventListener('click', () => openModal('backupModal'));
-	document.getElementById('backupFooter').addEventListener('click', () => openModal('backupModal'));
-	document.getElementById('restoreInput').addEventListener('change', restoreBackup);
 	document.addEventListener('keydown', (event) => {
 		if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
 			event.preventDefault();
@@ -518,7 +496,6 @@ async function sendMessage(event) {
 	formData.set('chat_id', activeChatId);
 	formData.set('body', body);
 	if (selectedFile) formData.set('attachment', selectedFile);
-	if (replyingTo) formData.set('reply_to_id', replyingTo);
 	const submit = event.currentTarget.querySelector('.send-button');
 	submit.disabled = true;
 	try {
@@ -526,7 +503,6 @@ async function sendMessage(event) {
 		document.getElementById('messageInput').value = '';
 		document.getElementById('messageInput').style.height = '';
 		resetAttachment();
-		resetReply();
 		const currentChat = activeChatId;
 		await loadChats();
 		if (currentChat === activeChatId) {
@@ -538,26 +514,6 @@ async function sendMessage(event) {
 	finally { submit.disabled = false; }
 }
 
-function resetReply() {
-	replyingTo = null;
-	const replyPreview = document.getElementById('replyPreview');
-	if (replyPreview) replyPreview.remove();
-}
-
-function showReplyPreview(message) {
-	resetReply();
-	replyingTo = Number(message.id);
-	const replyText = message.body || 'Lampiran';
-	const composer = document.getElementById('messageForm');
-	const preview = document.createElement('div');
-	preview.id = 'replyPreview';
-	preview.className = 'reply-preview';
-	preview.innerHTML = `<div class="reply-preview-content"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg><span>Membalas: ${escapeHtml(String(replyText).slice(0, 50))}${String(replyText).length > 50 ? '...' : ''}</span></div><button type="button" aria-label="Batalkan balasan">×</button>`;
-	composer.insertBefore(preview, composer.firstChild);
-	preview.querySelector('button').addEventListener('click', resetReply);
-	document.getElementById('messageInput').focus();
-}
-
 async function handleMessageAction(event) {
 	const button = event.target.closest('[data-message-action]');
 	if (!button) return;
@@ -566,18 +522,7 @@ async function handleMessageAction(event) {
 	const action = button.dataset.messageAction;
 
 	try {
-		if (action === 'reply') {
-			const messageBubble = messageElement.querySelector('.message-bubble');
-			const replyBubble = messageBubble.querySelector('.message-reply');
-			let messageBody = messageBubble.innerText.trim();
-
-			// Remove reply text if exists
-			if (replyBubble) {
-				messageBody = messageBody.replace(replyBubble.innerText.trim(), '').trim();
-			}
-
-			showReplyPreview({ id: messageId, body: messageBody });
-		} else if (action === 'delete') {
+		if (action === 'delete') {
 			if (!window.confirm('Hapus pesan ini?')) return;
 			await requestApi('messages', { method: 'DELETE', body: { id: messageId } });
 			const result = await requestApi(`messages&chat_id=${encodeURIComponent(activeChatId)}`);
@@ -586,13 +531,7 @@ async function handleMessageAction(event) {
 			showToast('Pesan dihapus.');
 		} else if (action === 'edit') {
 			const messageBubble = messageElement.querySelector('.message-bubble');
-			const replyBubble = messageBubble.querySelector('.message-reply');
 			let currentText = messageBubble.innerText.trim();
-
-			// Remove reply text if exists
-			if (replyBubble) {
-				currentText = currentText.replace(replyBubble.innerText.trim(), '').trim();
-			}
 
 			const body = window.prompt('Ubah pesan', currentText);
 			if (body === null || !body.trim()) return;
@@ -603,29 +542,6 @@ async function handleMessageAction(event) {
 			showToast('Pesan diperbarui.');
 		}
 	} catch (error) { showToast(error.message, 'error'); }
-}
-
-async function restoreBackup(event) {
-	const file = event.target.files[0];
-	if (!file) return;
-	if (!window.confirm('Pemulihan akan mengganti semua chat dan pesan saat ini. Lanjutkan?')) {
-		event.target.value = '';
-		return;
-	}
-	try {
-		const backup = JSON.parse(await file.text());
-		await requestApi('backup.restore', { method: 'POST', body: { backup } });
-		closeModal(document.getElementById('backupModal'));
-		activeChatId = null;
-		document.getElementById('conversationHeader').classList.add('hidden');
-		document.getElementById('messageScroll').classList.add('hidden');
-		document.getElementById('messageForm').classList.add('hidden');
-		document.getElementById('welcomeState').classList.remove('hidden');
-		await loadChats();
-		messenger.classList.remove('chat-open');
-		showToast('Cadangan berhasil dipulihkan.');
-	} catch (error) { showToast(error instanceof SyntaxError ? 'Berkas JSON tidak dapat dibaca.' : error.message, 'error'); }
-	finally { event.target.value = ''; }
 }
 
 async function logout() {
