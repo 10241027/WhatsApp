@@ -13,24 +13,101 @@ function requireCsrf(): void
     }
 }
 
-function ownedChat(int $chatId, int $userId): array
+function conversationForUser(int $conversationId, int $userId): array
 {
-    $query = database()->prepare('SELECT * FROM chats WHERE id = ? AND user_id = ?');
-    $query->execute([$chatId, $userId]);
-    $chat = $query->fetch();
-    if (!$chat) {
+    $query = database()->prepare(
+        'SELECT c.*, CASE WHEN c.participant_one_id = ? THEN c.participant_two_id ELSE c.participant_one_id END AS contact_user_id
+         FROM conversations c
+         WHERE c.id = ? AND (c.participant_one_id = ? OR c.participant_two_id = ?)'
+    );
+    $query->execute([$userId, $conversationId, $userId, $userId]);
+    $conversation = $query->fetch();
+    if (!$conversation) {
         jsonResponse(['error' => 'Percakapan tidak ditemukan.'], 404);
     }
-    return $chat;
+    return $conversation;
 }
 
-function messagePayload(array $message): array
+function conversationFullForUser(int $conversationId, int $userId): array
 {
+    $query = database()->prepare(
+        'SELECT c.id, c.updated_at, cp.archived, cp.display_name,
+                CASE WHEN c.participant_one_id = ? THEN u2.id ELSE u1.id END AS contact_user_id,
+                CASE WHEN c.participant_one_id = ? THEN u2.name ELSE u1.name END AS contact_name,
+                CASE WHEN c.participant_one_id = ? THEN u2.phone ELSE u1.phone END AS contact_phone,
+                (SELECT body FROM conversation_messages WHERE conversation_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1) AS last_message,
+                (SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = c.id AND attachment_path IS NOT NULL) AS file_count
+         FROM conversations c
+         JOIN users u1 ON u1.id = c.participant_one_id
+         JOIN users u2 ON u2.id = c.participant_two_id
+         LEFT JOIN conversation_preferences cp ON cp.conversation_id = c.id AND cp.user_id = ?
+         WHERE c.id = ? AND (c.participant_one_id = ? OR c.participant_two_id = ?)
+           AND COALESCE(cp.archived, 0) = 0 AND cp.deleted_at IS NULL'
+    );
+    $query->execute([$userId, $userId, $userId, $userId, $conversationId, $userId, $userId]);
+    $conversation = $query->fetch();
+    if (!$conversation) {
+        jsonResponse(['error' => 'Percakapan tidak ditemukan.'], 404);
+    }
+    return $conversation;
+}
+
+function conversationPayload(array $conversation, int $userId): array
+{
+    $contactId = (int) $conversation['contact_user_id'];
+    $colors = ['#a77458', '#667b91', '#8d745f', '#728b70', '#9c6e78'];
+    $name = $conversation['display_name'] ?: $conversation['contact_name'];
+    return [
+        'id' => (int) $conversation['id'],
+        'contact_user_id' => $contactId,
+        'contact_name' => $name,
+        'contact_phone' => $conversation['contact_phone'],
+        'avatar_color' => $colors[$contactId % count($colors)],
+        'archived' => (int) $conversation['archived'],
+        'updated_at' => $conversation['updated_at'],
+        'last_message' => $conversation['last_message'],
+        'file_count' => (int) $conversation['file_count'],
+    ];
+}
+
+function messagePayload(array $message, int $userId): array
+{
+    $message['chat_id'] = (int) $message['conversation_id'];
+    $message['sender'] = (int) $message['sender_user_id'] === $userId ? 'me' : 'contact';
+    $message['is_read'] = (int) $message['is_read'];
     if (!empty($message['attachment_path'])) {
         $message['attachment_url'] = 'index.php?api=file&id=' . (int) $message['id'];
     }
-    unset($message['attachment_path']);
+    unset($message['attachment_path'], $message['sender_user_id']);
     return $message;
+}
+
+function attachmentData(): array
+{
+    $file = $_FILES['attachment'] ?? null;
+    if (!$file || $file['error'] === UPLOAD_ERR_NO_FILE) {
+        return [null, null, null, null];
+    }
+    if ($file['error'] !== UPLOAD_ERR_OK || $file['size'] > 12 * 1024 * 1024) {
+        jsonResponse(['error' => 'Ukuran file maksimal 12 MB.'], 422);
+    }
+
+    $mime = (new finfo(FILEINFO_MIME_TYPE))->file($file['tmp_name']) ?: 'application/octet-stream';
+    $extensions = [
+        'image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp',
+        'video/mp4' => 'mp4', 'video/webm' => 'webm', 'video/ogg' => 'ogv', 'video/quicktime' => 'mov',
+        'application/pdf' => 'pdf', 'text/plain' => 'txt', 'application/zip' => 'zip',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
+    ];
+    if (!isset($extensions[$mime])) {
+        jsonResponse(['error' => 'Jenis file ini belum didukung.'], 422);
+    }
+    $pathName = bin2hex(random_bytes(20)) . '.' . $extensions[$mime];
+    if (!move_uploaded_file($file['tmp_name'], UPLOAD_ROOT . '/' . $pathName)) {
+        jsonResponse(['error' => 'File gagal disimpan.'], 500);
+    }
+    return [$pathName, mb_substr(basename((string) $file['name']), 0, 255), $mime, (int) $file['size']];
 }
 
 if ($action === 'auth.session' && $method === 'GET') {
@@ -47,7 +124,6 @@ if ($action === 'auth.register' && $method === 'POST') {
     if (mb_strlen($name) < 2 || mb_strlen($name) > 120 || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 8) {
         jsonResponse(['error' => 'Periksa nama, email, dan kata sandi minimal 8 karakter.'], 422);
     }
-
     $code = (string) random_int(100000, 999999);
     try {
         $insert = $db->prepare('INSERT INTO users (name, email, phone, password_hash, verification_code_hash, verification_expires) VALUES (?, ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE))');
@@ -68,17 +144,16 @@ if ($action === 'auth.login' && $method === 'POST') {
     $email = strtolower(trim((string) ($data['email'] ?? '')));
     $query = $db->prepare('SELECT * FROM users WHERE email = ?');
     $query->execute([$email]);
-    $user = $query->fetch();
-    if (!$user || !password_verify((string) ($data['password'] ?? ''), $user['password_hash'])) {
+    $account = $query->fetch();
+    if (!$account || !password_verify((string) ($data['password'] ?? ''), $account['password_hash'])) {
         jsonResponse(['error' => 'Email atau kata sandi tidak sesuai.'], 422);
     }
-    if (!(int) $user['is_verified']) {
-        $_SESSION['pending_user_id'] = (int) $user['id'];
+    if (!(int) $account['is_verified']) {
+        $_SESSION['pending_user_id'] = (int) $account['id'];
         jsonResponse(['requires_verification' => true, 'email' => $email]);
     }
     session_regenerate_id(true);
-    $_SESSION['user_id'] = (int) $user['id'];
-    seedChats((int) $user['id']);
+    $_SESSION['user_id'] = (int) $account['id'];
     jsonResponse(['user' => currentUser()]);
 }
 
@@ -93,8 +168,7 @@ if ($action === 'auth.resend' && $method === 'POST') {
         jsonResponse(['error' => 'Sesi verifikasi tidak ditemukan. Silakan daftar kembali.'], 404);
     }
     $code = (string) random_int(100000, 999999);
-    $update = $db->prepare('UPDATE users SET verification_code_hash = ?, verification_expires = DATE_ADD(NOW(), INTERVAL 15 MINUTE) WHERE id = ?');
-    $update->execute([password_hash($code, PASSWORD_DEFAULT), $userId]);
+    $db->prepare('UPDATE users SET verification_code_hash = ?, verification_expires = DATE_ADD(NOW(), INTERVAL 15 MINUTE) WHERE id = ?')->execute([password_hash($code, PASSWORD_DEFAULT), $userId]);
     jsonResponse(['message' => 'Kode baru siap digunakan.', 'demo_code' => $code]);
 }
 
@@ -108,12 +182,10 @@ if ($action === 'auth.verify' && $method === 'POST') {
     if (!$pending || !password_verify((string) ($data['code'] ?? ''), $pending['verification_code_hash'] ?? '')) {
         jsonResponse(['error' => 'Kode salah atau sudah kedaluwarsa.'], 422);
     }
-    $update = $db->prepare('UPDATE users SET is_verified = 1, verification_code_hash = NULL, verification_expires = NULL WHERE id = ?');
-    $update->execute([$userId]);
+    $db->prepare('UPDATE users SET is_verified = 1, verification_code_hash = NULL, verification_expires = NULL WHERE id = ?')->execute([$userId]);
     session_regenerate_id(true);
     unset($_SESSION['pending_user_id']);
     $_SESSION['user_id'] = $userId;
-    seedChats($userId);
     jsonResponse(['user' => currentUser()]);
 }
 
@@ -126,8 +198,12 @@ if ($action === 'auth.logout' && $method === 'POST') {
 
 if ($action === 'file' && $method === 'GET') {
     $user = requireUser();
-    $query = $db->prepare('SELECT m.attachment_path, m.attachment_name, m.attachment_mime FROM messages m JOIN chats c ON c.id = m.chat_id WHERE m.id = ? AND c.user_id = ?');
-    $query->execute([(int) ($_GET['id'] ?? 0), $user['id']]);
+    $query = $db->prepare(
+        'SELECT m.attachment_path, m.attachment_name, m.attachment_mime FROM conversation_messages m
+         JOIN conversations c ON c.id = m.conversation_id
+         WHERE m.id = ? AND (c.participant_one_id = ? OR c.participant_two_id = ?)'
+    );
+    $query->execute([(int) ($_GET['id'] ?? 0), $user['id'], $user['id']]);
     $file = $query->fetch();
     $path = $file ? UPLOAD_ROOT . '/' . basename((string) $file['attachment_path']) : '';
     if (!$file || !is_file($path)) {
@@ -146,39 +222,63 @@ $user = requireUser();
 
 if ($action === 'chats' && $method === 'GET') {
     $archived = (int) filter_var($_GET['archived'] ?? false, FILTER_VALIDATE_BOOLEAN);
-    $query = $db->prepare("SELECT c.*, (SELECT body FROM messages WHERE chat_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1) AS last_message, (SELECT COUNT(*) FROM messages WHERE chat_id = c.id AND attachment_path IS NOT NULL) AS file_count FROM chats c WHERE c.user_id = ? AND c.archived = ? ORDER BY c.updated_at DESC, c.id DESC");
-    $query->execute([$user['id'], $archived]);
-    jsonResponse(['chats' => $query->fetchAll()]);
+    $query = $db->prepare(
+        'SELECT c.id, c.updated_at, cp.archived, cp.display_name,
+                CASE WHEN c.participant_one_id = ? THEN u2.id ELSE u1.id END AS contact_user_id,
+                CASE WHEN c.participant_one_id = ? THEN u2.name ELSE u1.name END AS contact_name,
+                CASE WHEN c.participant_one_id = ? THEN u2.phone ELSE u1.phone END AS contact_phone,
+                (SELECT body FROM conversation_messages WHERE conversation_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1) AS last_message,
+                (SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = c.id AND attachment_path IS NOT NULL) AS file_count
+         FROM conversations c
+         JOIN users u1 ON u1.id = c.participant_one_id
+         JOIN users u2 ON u2.id = c.participant_two_id
+         LEFT JOIN conversation_preferences cp ON cp.conversation_id = c.id AND cp.user_id = ?
+         WHERE (c.participant_one_id = ? OR c.participant_two_id = ?)
+           AND COALESCE(cp.archived, 0) = ? AND cp.deleted_at IS NULL
+         ORDER BY c.updated_at DESC, c.id DESC'
+    );
+    $query->execute([$user['id'], $user['id'], $user['id'], $user['id'], $user['id'], $user['id'], $archived]);
+    $chats = array_map(static fn (array $chat): array => conversationPayload($chat, (int) $user['id']), $query->fetchAll());
+    jsonResponse(['chats' => $chats]);
 }
 
 if ($action === 'chats' && $method === 'POST') {
     requireCsrf();
     $data = requestData();
-    $name = trim((string) ($data['name'] ?? ''));
-    $phone = trim((string) ($data['phone'] ?? ''));
-    if (mb_strlen($name) < 2 || mb_strlen($name) > 120) {
-        jsonResponse(['error' => 'Nama kontak harus terdiri dari 2 hingga 120 karakter.'], 422);
+    $identity = strtolower(trim((string) ($data['email'] ?? $data['phone'] ?? '')));
+    if ($identity === '') {
+        jsonResponse(['error' => 'Masukkan email pengguna yang ingin dihubungi.'], 422);
     }
-    $colors = ['#a77458', '#667b91', '#8d745f', '#728b70', '#9c6e78'];
-    $insert = $db->prepare('INSERT INTO chats (user_id, contact_name, contact_phone, avatar_color) VALUES (?, ?, ?, ?)');
-    $insert->execute([$user['id'], $name, $phone, $colors[array_rand($colors)]]);
-    jsonResponse(['chat_id' => (int) $db->lastInsertId()], 201);
+    $contactQuery = $db->prepare('SELECT id FROM users WHERE LOWER(email) = ? AND is_verified = 1 LIMIT 1');
+    $contactQuery->execute([$identity]);
+    $contact = $contactQuery->fetch();
+    if (!$contact) {
+        jsonResponse(['error' => 'Pengguna tidak ditemukan atau belum memverifikasi akun.'], 404);
+    }
+    $contactId = (int) $contact['id'];
+    if ($contactId === (int) $user['id']) {
+        jsonResponse(['error' => 'Anda tidak dapat membuat percakapan dengan akun sendiri.'], 422);
+    }
+    $first = min((int) $user['id'], $contactId);
+    $second = max((int) $user['id'], $contactId);
+    $db->prepare('INSERT INTO conversations (participant_one_id, participant_two_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)')->execute([$first, $second]);
+    $conversationId = (int) $db->lastInsertId();
+    $db->prepare('INSERT INTO conversation_preferences (conversation_id, user_id, archived, deleted_at) VALUES (?, ?, 0, NULL) ON DUPLICATE KEY UPDATE archived = 0, deleted_at = NULL')->execute([$conversationId, $user['id']]);
+    jsonResponse(['chat_id' => $conversationId], 201);
 }
 
 if ($action === 'chats' && $method === 'PATCH') {
     requireCsrf();
     $data = requestData();
-    $chat = ownedChat((int) ($data['id'] ?? 0), (int) $user['id']);
+    $conversation = conversationForUser((int) ($data['id'] ?? 0), (int) $user['id']);
     if (array_key_exists('archived', $data)) {
-        $update = $db->prepare('UPDATE chats SET archived = ? WHERE id = ?');
-        $update->execute([(int) (bool) $data['archived'], $chat['id']]);
+        $db->prepare('INSERT INTO conversation_preferences (conversation_id, user_id, archived) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE archived = VALUES(archived), deleted_at = NULL')->execute([$conversation['id'], $user['id'], (int) (bool) $data['archived']]);
     } else {
         $name = trim((string) ($data['name'] ?? ''));
         if (mb_strlen($name) < 2 || mb_strlen($name) > 120) {
             jsonResponse(['error' => 'Nama kontak harus terdiri dari 2 hingga 120 karakter.'], 422);
         }
-        $update = $db->prepare('UPDATE chats SET contact_name = ? WHERE id = ?');
-        $update->execute([$name, $chat['id']]);
+        $db->prepare('INSERT INTO conversation_preferences (conversation_id, user_id, display_name) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE display_name = VALUES(display_name), deleted_at = NULL')->execute([$conversation['id'], $user['id'], $name]);
     }
     jsonResponse(['ok' => true]);
 }
@@ -186,199 +286,82 @@ if ($action === 'chats' && $method === 'PATCH') {
 if ($action === 'chats' && $method === 'DELETE') {
     requireCsrf();
     $data = requestData();
-    $chat = ownedChat((int) ($data['id'] ?? 0), (int) $user['id']);
-    $files = $db->prepare('SELECT attachment_path FROM messages WHERE chat_id = ? AND attachment_path IS NOT NULL');
-    $files->execute([$chat['id']]);
-    foreach ($files->fetchAll() as $file) {
-        $path = UPLOAD_ROOT . '/' . basename($file['attachment_path']);
-        if (is_file($path)) {
-            unlink($path);
-        }
-    }
-    $delete = $db->prepare('DELETE FROM chats WHERE id = ?');
-    $delete->execute([$chat['id']]);
+    $conversation = conversationForUser((int) ($data['id'] ?? 0), (int) $user['id']);
+    $db->prepare('INSERT INTO conversation_preferences (conversation_id, user_id, deleted_at) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE deleted_at = NOW()')->execute([$conversation['id'], $user['id']]);
     jsonResponse(['ok' => true]);
 }
 
 if ($action === 'messages' && $method === 'GET') {
-    $chat = ownedChat((int) ($_GET['chat_id'] ?? 0), (int) $user['id']);
-    $query = $db->prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at, id');
-    $query->execute([$chat['id']]);
-    jsonResponse(['chat' => $chat, 'messages' => array_map('messagePayload', $query->fetchAll())]);
+    $conversation = conversationFullForUser((int) ($_GET['chat_id'] ?? 0), (int) $user['id']);
+    $query = $db->prepare('SELECT * FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, id');
+    $query->execute([$conversation['id']]);
+    $db->prepare('UPDATE conversation_messages SET is_read = 1 WHERE conversation_id = ? AND sender_user_id <> ?')->execute([$conversation['id'], $user['id']]);
+    jsonResponse(['chat' => conversationPayload($conversation, (int) $user['id']), 'messages' => array_map(static fn (array $message): array => messagePayload($message, (int) $user['id']), $query->fetchAll())]);
+}
+
+if ($action === 'messages.poll' && $method === 'GET') {
+    $conversation = conversationForUser((int) ($_GET['chat_id'] ?? 0), (int) $user['id']);
+    $lastId = max(0, (int) ($_GET['last_id'] ?? 0));
+    $query = $db->prepare('SELECT * FROM conversation_messages WHERE conversation_id = ? AND id > ? ORDER BY created_at, id');
+    $query->execute([$conversation['id'], $lastId]);
+    $messages = $query->fetchAll();
+    $db->prepare('UPDATE conversation_messages SET is_read = 1 WHERE conversation_id = ? AND sender_user_id <> ?')->execute([$conversation['id'], $user['id']]);
+    jsonResponse(['messages' => array_map(static fn (array $message): array => messagePayload($message, (int) $user['id']), $messages)]);
 }
 
 if ($action === 'messages' && $method === 'POST') {
     requireCsrf();
-    $chatId = (int) ($_POST['chat_id'] ?? 0);
-    $chat = ownedChat($chatId, (int) $user['id']);
+    $conversation = conversationForUser((int) ($_POST['chat_id'] ?? 0), (int) $user['id']);
     $body = trim((string) ($_POST['body'] ?? ''));
-    $file = $_FILES['attachment'] ?? null;
-    if ($body === '' && (!$file || $file['error'] === UPLOAD_ERR_NO_FILE)) {
+    if (mb_strlen($body) > 5000) {
+        jsonResponse(['error' => 'Pesan maksimal terdiri dari 5000 karakter.'], 422);
+    }
+    [$pathName, $fileName, $mime, $fileSize] = attachmentData();
+    if ($body === '' && $pathName === null) {
         jsonResponse(['error' => 'Pesan atau file perlu diisi.'], 422);
     }
-    $pathName = $fileName = $mime = null;
-    $fileSize = null;
-    if ($file && $file['error'] !== UPLOAD_ERR_NO_FILE) {
-        if ($file['error'] !== UPLOAD_ERR_OK || $file['size'] > 12 * 1024 * 1024) {
-            jsonResponse(['error' => 'Ukuran file maksimal 12 MB.'], 422);
-        }
-        $mime = (new finfo(FILEINFO_MIME_TYPE))->file($file['tmp_name']) ?: 'application/octet-stream';
-        $safeMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'application/pdf', 'text/plain', 'application/zip', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
-        if (!in_array($mime, $safeMimes, true)) {
-            jsonResponse(['error' => 'Jenis file ini belum didukung.'], 422);
-        }
-        $extensions = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp', 'video/mp4' => 'mp4', 'video/webm' => 'webm', 'video/ogg' => 'ogv', 'video/quicktime' => 'mov', 'application/pdf' => 'pdf', 'text/plain' => 'txt', 'application/zip' => 'zip', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx'];
-        $pathName = bin2hex(random_bytes(20)) . '.' . $extensions[$mime];
-        if (!move_uploaded_file($file['tmp_name'], UPLOAD_ROOT . '/' . $pathName)) {
-            jsonResponse(['error' => 'File gagal disimpan.'], 500);
-        }
-        $fileName = basename((string) $file['name']);
-        $fileSize = (int) $file['size'];
-    }
-    $insert = $db->prepare('INSERT INTO messages (chat_id, sender, body, attachment_path, attachment_name, attachment_mime, attachment_size) VALUES (?, \'me\', ?, ?, ?, ?, ?)');
-    $insert->execute([$chat['id'], $body, $pathName, $fileName, $mime, $fileSize]);
+    $insert = $db->prepare('INSERT INTO conversation_messages (conversation_id, sender_user_id, body, attachment_path, attachment_name, attachment_mime, attachment_size) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    $insert->execute([$conversation['id'], $user['id'], $body, $pathName, $fileName, $mime, $fileSize]);
     $messageId = (int) $db->lastInsertId();
-    $db->prepare('UPDATE chats SET updated_at = NOW() WHERE id = ?')->execute([$chat['id']]);
-    $query = $db->prepare('SELECT * FROM messages WHERE id = ?');
+    $db->prepare('UPDATE conversations SET updated_at = NOW() WHERE id = ?')->execute([$conversation['id']]);
+    $db->prepare('UPDATE conversation_preferences SET deleted_at = NULL WHERE conversation_id = ? AND user_id = ?')->execute([$conversation['id'], $user['id']]);
+    $query = $db->prepare('SELECT * FROM conversation_messages WHERE id = ?');
     $query->execute([$messageId]);
-    jsonResponse(['message' => messagePayload($query->fetch())], 201);
+    jsonResponse(['message' => messagePayload($query->fetch(), (int) $user['id'])], 201);
 }
 
 if ($action === 'messages' && $method === 'PATCH') {
     requireCsrf();
     $data = requestData();
-    $query = $db->prepare("SELECT m.id FROM messages m JOIN chats c ON c.id = m.chat_id WHERE m.id = ? AND c.user_id = ? AND m.sender = 'me'");
-    $query->execute([(int) ($data['id'] ?? 0), $user['id']]);
-    $message = $query->fetch();
     $body = trim((string) ($data['body'] ?? ''));
-    if (!$message || $body === '' || mb_strlen($body) > 5000) {
+    if ($body === '' || mb_strlen($body) > 5000) {
         jsonResponse(['error' => 'Pesan tidak dapat diperbarui.'], 422);
     }
-    $update = $db->prepare('UPDATE messages SET body = ?, is_edited = 1 WHERE id = ?');
-    $update->execute([$body, $message['id']]);
+    $query = $db->prepare('SELECT m.id FROM conversation_messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = ? AND m.sender_user_id = ? AND (c.participant_one_id = ? OR c.participant_two_id = ?)');
+    $query->execute([(int) ($data['id'] ?? 0), $user['id'], $user['id'], $user['id']]);
+    $message = $query->fetch();
+    if (!$message) {
+        jsonResponse(['error' => 'Pesan tidak ditemukan.'], 404);
+    }
+    $db->prepare('UPDATE conversation_messages SET body = ?, is_edited = 1 WHERE id = ?')->execute([$body, $message['id']]);
     jsonResponse(['ok' => true]);
 }
 
 if ($action === 'messages' && $method === 'DELETE') {
     requireCsrf();
     $data = requestData();
-    $query = $db->prepare("SELECT m.id, m.attachment_path FROM messages m JOIN chats c ON c.id = m.chat_id WHERE m.id = ? AND c.user_id = ? AND m.sender = 'me'");
-    $query->execute([(int) ($data['id'] ?? 0), $user['id']]);
+    $query = $db->prepare('SELECT m.id, m.attachment_path FROM conversation_messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = ? AND m.sender_user_id = ? AND (c.participant_one_id = ? OR c.participant_two_id = ?)');
+    $query->execute([(int) ($data['id'] ?? 0), $user['id'], $user['id'], $user['id']]);
     $message = $query->fetch();
     if (!$message) {
         jsonResponse(['error' => 'Pesan tidak ditemukan.'], 404);
     }
+    $db->prepare('DELETE FROM conversation_messages WHERE id = ?')->execute([$message['id']]);
     if ($message['attachment_path']) {
         $path = UPLOAD_ROOT . '/' . basename($message['attachment_path']);
         if (is_file($path)) {
             unlink($path);
         }
-    }
-    $db->prepare('DELETE FROM messages WHERE id = ?')->execute([$message['id']]);
-    jsonResponse(['ok' => true]);
-}
-
-if ($action === 'backup.export' && $method === 'GET') {
-    $chats = $db->prepare('SELECT id, contact_name, contact_phone, avatar_color, archived FROM chats WHERE user_id = ? ORDER BY id');
-    $chats->execute([$user['id']]);
-    $result = [];
-    $attachmentBytes = 0;
-    foreach ($chats->fetchAll() as $chat) {
-        $messages = $db->prepare('SELECT sender, body, attachment_path, attachment_name, attachment_mime, attachment_size, created_at FROM messages WHERE chat_id = ? ORDER BY id');
-        $messages->execute([$chat['id']]);
-        $chat['messages'] = $messages->fetchAll();
-        foreach ($chat['messages'] as &$message) {
-            if ($message['attachment_path']) {
-                $path = UPLOAD_ROOT . '/' . basename($message['attachment_path']);
-                if (is_file($path)) {
-                    $attachmentBytes += filesize($path);
-                    if ($attachmentBytes > 25 * 1024 * 1024) {
-                        jsonResponse(['error' => 'Cadangan dengan lampiran dibatasi hingga 25 MB.'], 413);
-                    }
-                    $message['attachment_data'] = base64_encode((string) file_get_contents($path));
-                }
-            }
-            unset($message['attachment_path']);
-        }
-        unset($message);
-        $result[] = $chat;
-    }
-    header('Content-Type: application/json; charset=utf-8');
-    header('Content-Disposition: attachment; filename="whatsapp-backup-' . date('Y-m-d') . '.json"');
-    echo json_encode(['format' => 'whatsapp-backup', 'version' => 1, 'exported_at' => date(DATE_ATOM), 'chats' => $result], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
-    exit;
-}
-
-if ($action === 'backup.restore' && $method === 'POST') {
-    requireCsrf();
-    $data = requestData();
-    $backup = $data['backup'] ?? null;
-    if (!is_array($backup) || ($backup['format'] ?? '') !== 'whatsapp-backup' || !is_array($backup['chats'] ?? null) || count($backup['chats']) > 500) {
-        jsonResponse(['error' => 'File cadangan tidak valid.'], 422);
-    }
-    $db->beginTransaction();
-    $createdFiles = [];
-    $oldFiles = $db->prepare('SELECT m.attachment_path FROM messages m JOIN chats c ON c.id = m.chat_id WHERE c.user_id = ? AND m.attachment_path IS NOT NULL');
-    $oldFiles->execute([$user['id']]);
-    $oldPaths = array_column($oldFiles->fetchAll(), 'attachment_path');
-    try {
-        $delete = $db->prepare('DELETE FROM chats WHERE user_id = ?');
-        $delete->execute([$user['id']]);
-        $insertChat = $db->prepare('INSERT INTO chats (user_id, contact_name, contact_phone, avatar_color, archived) VALUES (?, ?, ?, ?, ?)');
-        $insertMessage = $db->prepare('INSERT INTO messages (chat_id, sender, body, attachment_path, attachment_name, attachment_mime, attachment_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-        $extensions = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp', 'video/mp4' => 'mp4', 'video/webm' => 'webm', 'video/ogg' => 'ogv', 'video/quicktime' => 'mov', 'application/pdf' => 'pdf', 'text/plain' => 'txt', 'application/zip' => 'zip', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx'];
-        $restoredBytes = 0;
-        foreach ($backup['chats'] as $chat) {
-            $name = trim((string) ($chat['contact_name'] ?? ''));
-            if ($name === '' || !is_array($chat['messages'] ?? [])) {
-                throw new InvalidArgumentException('Data percakapan tidak lengkap.');
-            }
-            $insertChat->execute([$user['id'], mb_substr($name, 0, 120), mb_substr((string) ($chat['contact_phone'] ?? ''), 0, 30), (string) ($chat['avatar_color'] ?? '#5b7c73'), (int) !empty($chat['archived'])]);
-            $newChatId = (int) $db->lastInsertId();
-            foreach (array_slice($chat['messages'], 0, 5000) as $message) {
-                $filePath = $fileName = $mime = null;
-                $fileSize = null;
-                if (!empty($message['attachment_data'])) {
-                    $mime = (string) ($message['attachment_mime'] ?? '');
-                    $fileContents = base64_decode((string) $message['attachment_data'], true);
-                    if (!isset($extensions[$mime]) || $fileContents === false || strlen($fileContents) > 12 * 1024 * 1024) {
-                        throw new InvalidArgumentException('Lampiran di dalam cadangan tidak valid.');
-                    }
-                    $restoredBytes += strlen($fileContents);
-                    if ($restoredBytes > 25 * 1024 * 1024) {
-                        throw new InvalidArgumentException('Ukuran total lampiran cadangan melebihi 25 MB.');
-                    }
-                    $filePath = bin2hex(random_bytes(20)) . '.' . $extensions[$mime];
-                    if (file_put_contents(UPLOAD_ROOT . '/' . $filePath, $fileContents, LOCK_EX) === false) {
-                        throw new RuntimeException('Lampiran cadangan gagal disimpan.');
-                    }
-                    $createdFiles[] = $filePath;
-                    $fileName = mb_substr(basename((string) ($message['attachment_name'] ?? 'lampiran')), 0, 255);
-                    $fileSize = strlen($fileContents);
-                }
-                $createdAt = $message['created_at'] ?? date('Y-m-d H:i:s');
-                if (!is_string($createdAt) || strtotime($createdAt) === false) {
-                    $createdAt = date('Y-m-d H:i:s');
-                }
-                $insertMessage->execute([$newChatId, ($message['sender'] ?? '') === 'contact' ? 'contact' : 'me', mb_substr((string) ($message['body'] ?? ''), 0, 5000), $filePath, $fileName, $mime, $fileSize, date('Y-m-d H:i:s', strtotime($createdAt))]);
-            }
-        }
-        $db->commit();
-        foreach ($oldPaths as $oldPath) {
-            $path = UPLOAD_ROOT . '/' . basename($oldPath);
-            if (is_file($path)) {
-                unlink($path);
-            }
-        }
-    } catch (Throwable $error) {
-        $db->rollBack();
-        foreach ($createdFiles as $createdFile) {
-            $path = UPLOAD_ROOT . '/' . basename($createdFile);
-            if (is_file($path)) {
-                unlink($path);
-            }
-        }
-        jsonResponse(['error' => 'Pemulihan gagal: ' . $error->getMessage()], 422);
     }
     jsonResponse(['ok' => true]);
 }
